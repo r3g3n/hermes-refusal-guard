@@ -59,7 +59,7 @@ base64 < your-preprompt.txt | tr -d '\n' >> preprompts.b64.txt
 Or one-shot with Python:
 
 ```bash
-python3 -c 'import base64,sys; print("base64:"+base64.b64encode(Path:=open(sys.argv[1],"rb").read()).decode())' your-preprompt.txt
+python3 -c 'import base64,sys; print("base64:"+base64.b64encode(open(sys.argv[1],"rb").read()).decode())' your-preprompt.txt
 ```
 
 Put only placeholders in git. Keep real `preprompts.json` private (it is gitignored).
