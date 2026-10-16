@@ -258,7 +258,8 @@ def _suggest_main_fallback(refused_model: str) -> dict[str, Any]:
     }
 
 
-def _find_live_agent(session_id: str = ""):
+def _find_live_session(session_id: str = ""):
+    """Return (tui_sid, session_dict) for the live TUI session, or (None, None)."""
     sid = (session_id or "").strip()
     try:
         from tui_gateway import server as tui_server  # type: ignore
@@ -266,31 +267,96 @@ def _find_live_agent(session_id: str = ""):
         lock = getattr(tui_server, "_sessions_lock", None)
 
         def _scan():
-            for sess in sessions.values():
-                agent = sess.get("agent")
-                if agent is None:
+            for tui_sid, sess in list(sessions.items()):
+                if not isinstance(sess, dict):
                     continue
-                if not sid:
-                    return agent
+                agent = sess.get("agent")
                 keys = {
                     str(sess.get("session_key") or ""),
-                    str(getattr(agent, "session_id", "") or ""),
                     str(sess.get("id") or ""),
+                    str(tui_sid or ""),
                 }
+                if agent is not None:
+                    keys.add(str(getattr(agent, "session_id", "") or ""))
+                if not sid:
+                    if agent is not None:
+                        return str(tui_sid), sess
+                    continue
                 if sid in keys or any(sid and sid in k for k in keys if k):
-                    return agent
-            return None
+                    return str(tui_sid), sess
+            return None, None
 
         if lock is not None:
             with lock:
                 return _scan()
         return _scan()
     except Exception as exc:
-        logger.debug("refusal-guard: live agent lookup failed: %s", exc)
+        logger.debug("refusal-guard: live session lookup failed: %s", exc)
+        return None, None
+
+
+def _find_live_agent(session_id: str = ""):
+    _sid, sess = _find_live_session(session_id)
+    if sess is None:
         return None
+    return sess.get("agent")
+
+
+def _fallback_providers_head() -> dict[str, Any]:
+    """First entry from config fallback_providers (the sticky session target)."""
+    try:
+        from hermes_cli.config import load_config  # type: ignore
+        cfg = load_config() or {}
+        chain = cfg.get("fallback_providers") or []
+        if isinstance(chain, list) and chain and isinstance(chain[0], dict):
+            return dict(chain[0])
+    except Exception as exc:
+        logger.debug("refusal-guard: fallback_providers head failed: %s", exc)
+    return {
+        "provider": "litellm",
+        "model": "fallback-a",
+        "base_url": "http://127.0.0.1:4000/v1",
+    }
 
 
 def _activate_hermes_fallback(session_id: str = "") -> dict[str, Any]:
+    """Sticky session switch to fallback_providers head (like /model), not turn-scoped fallback.
+
+    try_activate_fallback alone is turn-scoped: restore_primary_runtime puts the primary model back
+    on the next turn. We use tui_gateway._apply_model_switch so model_override + primary
+    runtime + HUD all stick for the rest of the session.
+    """
+    tui_sid, session = _find_live_session(session_id)
+    fb = _fallback_providers_head()
+    target_model = str(fb.get("model") or "fallback-a").strip()
+    target_provider = str(fb.get("provider") or "litellm").strip()
+    raw = f"{target_model} --provider {target_provider}"
+
+    if tui_sid and isinstance(session, dict):
+        try:
+            from tui_gateway import server as tui_server  # type: ignore
+            apply_fn = getattr(tui_server, "_apply_model_switch", None)
+            if callable(apply_fn):
+                result = apply_fn(
+                    tui_sid,
+                    session,
+                    raw,
+                    confirm_expensive_model=True,
+                    pin_session_override=True,
+                    count_switch=False,
+                )
+                agent = session.get("agent")
+                return {
+                    "activated": True,
+                    "sticky": True,
+                    "model": (result or {}).get("value") or getattr(agent, "model", target_model),
+                    "provider": getattr(agent, "provider", None) or target_provider,
+                    "reason": "sticky_model_switch",
+                    "scope": (result or {}).get("scope"),
+                }
+        except Exception as exc:
+            logger.debug("refusal-guard: sticky model switch failed: %s", exc)
+
     agent = _find_live_agent(session_id)
     if agent is None:
         return {"activated": False, "reason": "no_live_agent"}
@@ -298,11 +364,23 @@ def _activate_hermes_fallback(session_id: str = "") -> dict[str, Any]:
         from agent.chat_completion_helpers import try_activate_fallback  # type: ignore
         from agent.error_classifier import FailoverReason  # type: ignore
         ok = try_activate_fallback(agent, FailoverReason.content_policy_blocked)
+        if ok:
+            try:
+                from agent.agent_runtime_helpers import _build_primary_runtime_snapshot  # type: ignore
+                agent._primary_runtime = _build_primary_runtime_snapshot(
+                    agent, getattr(agent, "api_mode", "") or ""
+                )
+                agent._fallback_activated = False
+                agent._provider_fallback_active = False
+                agent._fallback_index = 0
+            except Exception as prom_exc:
+                logger.debug("refusal-guard: promote primary failed: %s", prom_exc)
         return {
             "activated": bool(ok),
+            "sticky": bool(ok),
             "model": getattr(agent, "model", None),
             "provider": getattr(agent, "provider", None),
-            "reason": "content_policy_blocked" if ok else "fallback_chain_exhausted_or_deferred",
+            "reason": "promoted_primary" if ok else "fallback_chain_exhausted_or_deferred",
         }
     except Exception as exc:
         logger.debug("refusal-guard: try_activate_fallback failed: %s", exc)
@@ -410,9 +488,24 @@ def _advance_main_fallback(
     *,
     model: str,
     session_id: str = "",
+    activate: bool = False,
 ) -> dict[str, Any]:
+    """Prepare / optionally activate Hermes fallback_providers.
+
+    activate=False (default): only suggest next model — used during refusal detect
+    so in-turn refusal-guard retry is not raced by a mid-hook session switch.
+    activate=True: call try_activate_fallback on the live agent (for NEXT turns).
+    """
     suggestion = _suggest_main_fallback(model)
-    activation = _activate_hermes_fallback(session_id)
+    if activate:
+        activation = _activate_hermes_fallback(session_id)
+    else:
+        activation = {
+            "activated": False,
+            "reason": "deferred_until_after_in_turn_retry",
+            "model": suggestion.get("next_model"),
+            "provider": suggestion.get("next_provider"),
+        }
     next_model = activation.get("model") or suggestion.get("next_model")
     next_provider = activation.get("provider") or suggestion.get("next_provider")
     return {
@@ -628,8 +721,35 @@ def transform_llm_output(**kwargs: Any) -> Optional[str]:
             if msgs:
                 res = _rr.retry_chain(msgs, lambda t: bool(_det(t)), refused_model=model)
                 _log_line({"event": "refusal_retry", "refused_model": model, "ok": res.get("ok"), "model": res.get("model"), "tried": res.get("tried")})
+                # After in-turn retry finishes: rebind session to fallback_providers head
+                # (fallback-a) so NEXT user turns continue without primary-model refusals.
+                try:
+                    act = _activate_hermes_fallback(session_id)
+                    _log_line({
+                        "event": "session_switch",
+                        "refused_model": model,
+                        "activated": act.get("activated"),
+                        "model": act.get("model"),
+                        "provider": act.get("provider"),
+                        "reason": act.get("reason"),
+                    })
+                except Exception as _sw_e:
+                    act = {"activated": False, "reason": repr(_sw_e)}
+                    _log_line({"event": "session_switch_error", "error": repr(_sw_e)})
                 if res.get("ok"):
-                    return f"[refusal-guard] {model} refused; answer from {res['model']}:\n\n" + res["text"]
+                    _tr = res.get("tried") or []
+                    _trace = " -> ".join(f"{s.get('model')}={s.get('result')}" for s in _tr) or res["model"]
+                    _hdr = (f"[refusal-guard] {model} refused | chain: {_trace} | answer from {res['model']}")
+                    _sw = (
+                        f"session -> {act.get('model') or 'fallback-a'} (activated={bool(act.get('activated'))})"
+                        if act.get("activated")
+                        else f"session switch pending ({act.get('reason')})"
+                    )
+                    _foot = (
+                        f"\n\n----- [refusal-guard] {model} refused -> chain: {_trace} "
+                        f"-> answered by {res['model']} | {_sw} -----"
+                    )
+                    return _hdr + ":\n\n" + res["text"] + _foot
         except Exception as _e:
             _log_line({"event": "refusal_retry_error", "error": repr(_e)})
             logger.exception("refusal-guard: in-turn retry failed (fail-open)")

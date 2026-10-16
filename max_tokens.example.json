@@ -1,0 +1,5 @@
+{
+  "default": 4096,
+  "fallback-a": 8192,
+  "fallback-b": 2048
+}

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 # Plugin dir on sys.path as package parent
-PLUGIN_DIR = Path("/opt/data/plugins/refusal-guard")
+PLUGIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PLUGIN_DIR.parent))
 
 
@@ -65,19 +65,19 @@ class MainTurnRefusalTests(unittest.TestCase):
 
     def test_suggest_main_fallback_primary_not_in_chain(self):
         chain = [
-            {"provider": "litellm", "model": "dotop_deepseek-v4.1-flash"},
-            {"provider": "litellm", "model": "dotop_qwen3.8-27b"},
+            {"provider": "litellm", "model": "fallback-a"},
+            {"provider": "litellm", "model": "fallback-c"},
         ]
         with mock.patch.object(self.mod, "_load_hermes_fallback_providers", return_value=chain):
-            sug = self.mod._suggest_main_fallback("grok-4.5")
-        self.assertEqual(sug["next_model"], "dotop_deepseek-v4.1-flash")
+            sug = self.mod._suggest_main_fallback("primary-model")
+        self.assertEqual(sug["next_model"], "fallback-a")
         self.assertEqual(sug["next_provider"], "litellm")
         self.assertEqual(sug["from_index"], -1)
 
     def test_transform_llm_output_main_path_no_deep(self):
         chain = [
-            {"provider": "litellm", "model": "dotop_deepseek-v4.1-flash"},
-            {"provider": "litellm", "model": "dotop_qwen3.8-27b"},
+            {"provider": "litellm", "model": "fallback-a"},
+            {"provider": "litellm", "model": "fallback-c"},
         ]
         with mock.patch.object(self.mod, "_load_hermes_fallback_providers", return_value=chain), \
              mock.patch.object(self.mod, "_activate_hermes_fallback", return_value={
@@ -86,25 +86,25 @@ class MainTurnRefusalTests(unittest.TestCase):
              mock.patch.object(self.mod, "_call_omh_fallback") as omh_fb:
             out = self.mod.transform_llm_output(
                 response_text="Я не могу помочь с этим запросом.",
-                model="grok-4.5",
+                model="primary-model",
                 session_id="sess-test",
                 turn_id="turn-1",
             )
         self.assertIsInstance(out, str)
         self.assertIn("path=main", out)
         self.assertIn("do NOT use category=deep", out)
-        self.assertIn("dotop_deepseek-v4.1-flash", out)
+        self.assertIn("fallback-a", out)
         self.assertIn('{"mode": "main"}', out)
         self.assertNotIn("category='deep'", out)
         self.assertNotIn("NOT_APPLIED (no live OMH route", out)
         omh_fb.assert_not_called()
         signal = json.loads((self.omh / "routing" / "refusal-signal.json").read_text())
         self.assertEqual(signal["path"], "main")
-        self.assertEqual(signal["next_model"], "dotop_deepseek-v4.1-flash")
+        self.assertEqual(signal["next_model"], "fallback-a")
         self.assertIsNone(signal.get("category"))
 
     def test_refusal_fallback_tool_main_mode(self):
-        chain = [{"provider": "litellm", "model": "dotop_deepseek-v4.1-flash"}]
+        chain = [{"provider": "litellm", "model": "fallback-a"}]
         with mock.patch.object(self.mod, "_load_hermes_fallback_providers", return_value=chain), \
              mock.patch.object(self.mod, "_activate_hermes_fallback", return_value={
                  "activated": False, "reason": "no_live_agent",
@@ -112,7 +112,7 @@ class MainTurnRefusalTests(unittest.TestCase):
             raw = self.mod.refusal_fallback_handler({"mode": "main", "reason": "test"})
         data = json.loads(raw)
         self.assertEqual(data["mode"], "main")
-        self.assertEqual(data["next_model"], "dotop_deepseek-v4.1-flash")
+        self.assertEqual(data["next_model"], "fallback-a")
         self.assertIsNone(data["category"])
         self.assertEqual(data["status"], "ok")
 
