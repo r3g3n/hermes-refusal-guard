@@ -619,6 +619,20 @@ def transform_llm_output(**kwargs: Any) -> Optional[str]:
         )
         if not record:
             return None
+        try:
+            from . import refusal_retry as _rr
+            from .detector import detect_refusal as _det
+            agent = _find_live_agent(session_id)
+            msgs = _rr.build_messages(agent) if agent is not None else []
+            _log_line({"event": "refusal_retry_start", "refused_model": model, "have_agent": agent is not None, "msgs": len(msgs)})
+            if msgs:
+                res = _rr.retry_chain(msgs, lambda t: bool(_det(t)), refused_model=model)
+                _log_line({"event": "refusal_retry", "refused_model": model, "ok": res.get("ok"), "model": res.get("model"), "tried": res.get("tried")})
+                if res.get("ok"):
+                    return f"[refusal-guard] {model} refused; answer from {res['model']}:\n\n" + res["text"]
+        except Exception as _e:
+            _log_line({"event": "refusal_retry_error", "error": repr(_e)})
+            logger.exception("refusal-guard: in-turn retry failed (fail-open)")
         return response_text + _required_action_block(
             model,
             record["matched"],

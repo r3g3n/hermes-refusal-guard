@@ -1,7 +1,7 @@
 name: refusal-guard
-version: 1.3.0
+version: 1.3.1
 description: "Detect content-refusals (EN/RU + LiteLLM/garak + content_filter). Main-turn: prepare/activate Hermes fallback_providers (no fake OMH category). OMH-child: omh_delegate_route fallback + REQUIRED_ACTION to re-dispatch. Tool refusal_fallback mode=main|omh."
-author: "r3g3n"
+author: "custom (Phước Nhan / OMH-LiteLLM setup)"
 provides_hooks:
   - transform_llm_output
   - post_llm_call
