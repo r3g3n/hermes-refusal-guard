@@ -42,6 +42,29 @@ cp max_tokens.example.json max_tokens.json
 
 Also set Hermes top-level `fallback_providers` to the model you want the **session** to stick to after the first refusal (see sticky session switch above). Raise `plugins.hook_callback_timeout` if the chain can run long.
 
+## Preprompts (`base64:`)
+
+`preprompts.json` values may be plain text or Base64 with a `base64:` prefix (handy when the prompt has newlines/quotes). The plugin decodes on every retry; no restart needed.
+
+Generate from a file:
+
+```bash
+# macOS / Linux
+printf 'base64:' > preprompts.b64.txt
+base64 < your-preprompt.txt | tr -d '\n' >> preprompts.b64.txt
+# then paste the single line into preprompts.json, e.g.:
+# { "default": "", "fallback-a": "base64:...." }
+```
+
+Or one-shot with Python:
+
+```bash
+python3 -c 'import base64,sys; print("base64:"+base64.b64encode(Path:=open(sys.argv[1],"rb").read()).decode())' your-preprompt.txt
+```
+
+Put only placeholders in git. Keep real `preprompts.json` private (it is gitignored).
+
+
 ## Sensitive data
 
 This repository ships **placeholders only**. Put real model ids, gateway URLs, API keys, and any preprompt text in your private env / vault files — never commit them here.
